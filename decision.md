@@ -1,6 +1,70 @@
+Approach 1: Distributed Scan → Central Storage → Central Processing
+┌─────────────────────────────────────────────────────────────────────┐
+│              HYBRID: CENTRAL STORAGE ARCHITECTURE                    │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐            │
+│  │   GitHub     │   │  BitBucket   │   │ Azure DevOps │            │
+│  │   Actions    │   │  Pipelines   │   │   Pipelines  │            │
+│  │  + Renovate  │   │  + Renovate  │   │  + Renovate  │            │
+│  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘            │
+│         │                  │                   │                    │
+│         │     PUSH TO CENTRAL STORAGE          │                    │
+│         └──────────────────┼───────────────────┘                    │
+│                            ▼                                        │
+│            ┌───────────────────────────────┐                        │
+│            │      CENTRAL STORAGE          │                        │
+│            │  (S3 / GCS / Azure Blob /     │                        │
+│            │              Private Registry)                         │
+│            └───────────────┬───────────────┘                        │
+│                            │                                        │
+│                            ▼                                        │
+│                  ┌──────────────────┐                               │
+│                  │      GULLI       │                               │
+│                  │  (Polls storage  │                               │
+│                  │   only)          │                               │
+│                  └────────┬─────────┘                               │
+│                           ▼                                         │
+│              ┌────────────┴────────────┐                            │
+│              ▼                         ▼                            │
+│     ┌─────────────────┐      ┌─────────────────┐                    │
+│     │   Spreadsheet   │      │   Slack/JIRA    │                    │
+│     └─────────────────┘      └─────────────────┘                    │
+└─────────────────────────────────────────────────────────────────────┘
+
+Data flow: Pipeline → S3/GCS bucket ← Gulli polls bucket
+
+Pipelines push the report to a shared cloud storage bucket (S3, GCS, Azure Blob). Gulli only needs credentials for the bucket, not for any platform. It polls the bucket, downloads the latest file per platform.
+
+Problem: Extra infrastructure to manage. Each pipeline needs storage credentials. But Gulli itself is simpler — one storage API instead of many platform APIs.
+
+How it works:
+
+Each platform runs Renovate in its CI (as you have now)
+After scan, pipeline PUSHES report to central storage (S3/GCS)
+Gulli only needs credentials for storage (not platforms!)
+Gulli fetches reports from storage, processes, notifies
+
+Pros:
+
+Aspect	            Benefit
+Security	        Gulli ONLY needs storage credentials, not platform tokens
+Decoupled	        Platforms and processor are independent
+Platform-native CI	Each platform uses its own CI (no external access needed)
+Audit trail	        All reports stored with timestamps
+Scalable	        Can add platforms without changing Gulli
+Failure isolation	Platform failure doesn't affect others
+
+Cons:
+Aspect	            Drawback
+Extra infra	        Need to manage storage bucket
+Config duplication	Still need Renovate config in each platform
+Storage costs	    Minor, but exists
+Push complexity	    Each platform needs storage credentials
 
 
-Approach 0: Direct Spreadsheet Write from Workflows
+
+Approach 2: Direct Spreadsheet Write from Workflows
 ┌────────────────────────────────────────────────────────────────────────────────┐
 │                         DIRECT SPREADSHEET WRITE                               │
 ├────────────────────────────────────────────────────────────────────────────────┤
@@ -61,7 +125,7 @@ Race conditions when multiple workflows run simultaneously
 - wrokflow to aslack
 - code maintenacne / update script faces problem 
 
-Approach 1:
+Approach 3:
 Fully Distributed (Current Direction)
 ┌─────────────────────────────────────────────────────────────────────┐
 │                     DISTRIBUTED ARCHITECTURE                         │
@@ -121,141 +185,6 @@ Artifact retrieval	BitBucket has limited artifact API (requires workaround)
 Complexity	        Gulli needs multiple platform-specific collectors
 Consistency	        Config drift between platforms is possible
 Still needs creds	Gulli still needs API tokens to fetch artifacts
-
-
-Approach 2: Fully Centralized (Gulli + Renovate)
-
-┌─────────────────────────────────────────────────────────────────────┐
-│                     CENTRALIZED ARCHITECTURE                         │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│                  ┌─────────────────────────┐                        │
-│                  │         GULLI           │                        │
-│                  │   (Central Server/Cron) │                        │
-│                  └───────────┬─────────────┘                        │
-│                              │                                      │
-│                              ▼                                      │
-│                  ┌─────────────────────────┐                        │
-│                  │     Renovate CLI        │                        │
-│                  │  (runs inside Gulli)    │                        │
-│                  └───────────┬─────────────┘                        │
-│                              │                                      │
-│         ┌────────────────────┼────────────────────┐                 │
-│         ▼                    ▼                    ▼                 │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐            │
-│  │   GitHub     │   │  BitBucket   │   │ Azure DevOps │            │
-│  │    Repos     │   │    Repos     │   │    Repos     │            │
-│  └──────────────┘   └──────────────┘   └──────────────┘            │
-│                              │                                      │
-│                              ▼                                      │
-│              ┌────────────────────────────┐                         │
-│              │     In-Memory Processing    │                         │
-│              │   (No artifact transfer)    │                         │
-│              └───────────┬────────────────┘                         │
-│                          │                                          │
-│              ┌───────────┴───────────┐                              │
-│              ▼                       ▼                              │
-│     ┌─────────────────┐    ┌─────────────────┐                      │
-│     │   Spreadsheet   │    │   Slack/JIRA    │                      │
-│     └─────────────────┘    └─────────────────┘                      │
-└─────────────────────────────────────────────────────────────────────┘
-
-Data flow: Gulli runs Renovate directly → report is a local file
-
-There is no transfer. Gulli spawns Renovate CLI itself, Renovate scans repos across all platforms, writes the report to a local file, Gulli reads it immediately. Everything happens in one process on one machine.
-
-Problem: Gulli needs tokens for every platform. All credentials in one place. If that machine is compromised, everything is exposed.
-
-How it works:
-
-Gulli wakes up (cron)
-Gulli spawns Renovate CLI with --dry-run=full --report-type=file
-For each platform, Renovate scans repos directly
-Report is generated in-memory/local file
-Gulli processes report → spreadsheet → notify
-- Not Approved
-
-Pros:
-Aspect	                Benefit
-Single codebase	        One place to maintain all logic
-No artifact transfer	Data never leaves the central system
-Consistency	            Same processing logic for all platforms
-Simpler data flow	    No polling/fetching complexity
-Full control	        Complete ownership of the process
-
-Cons:
-Aspect	                Drawback
-SECURITY RISK	        Requires ALL platform tokens in one place
-Single point of failure	If Gulli dies, everything stops
-Resource intensive	    Scanning many repos takes time/memory
-Scaling limits	        Can't easily parallelize across machines
-Token exposure	        If Gulli server is compromised, all repos are exposed
-
-Approach 3: Distributed Scan → Central Storage → Central Processing
-┌─────────────────────────────────────────────────────────────────────┐
-│              HYBRID: CENTRAL STORAGE ARCHITECTURE                    │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐            │
-│  │   GitHub     │   │  BitBucket   │   │ Azure DevOps │            │
-│  │   Actions    │   │  Pipelines   │   │   Pipelines  │            │
-│  │  + Renovate  │   │  + Renovate  │   │  + Renovate  │            │
-│  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘            │
-│         │                  │                   │                    │
-│         │     PUSH TO CENTRAL STORAGE          │                    │
-│         └──────────────────┼───────────────────┘                    │
-│                            ▼                                        │
-│            ┌───────────────────────────────┐                        │
-│            │      CENTRAL STORAGE          │                        │
-│            │  (S3 / GCS / Azure Blob /     │                        │
-│            │              Private Registry)                         │
-│            └───────────────┬───────────────┘                        │
-│                            │                                        │
-│                            ▼                                        │
-│                  ┌──────────────────┐                               │
-│                  │      GULLI       │                               │
-│                  │  (Polls storage  │                               │
-│                  │   only)          │                               │
-│                  └────────┬─────────┘                               │
-│                           ▼                                         │
-│              ┌────────────┴────────────┐                            │
-│              ▼                         ▼                            │
-│     ┌─────────────────┐      ┌─────────────────┐                    │
-│     │   Spreadsheet   │      │   Slack/JIRA    │                    │
-│     └─────────────────┘      └─────────────────┘                    │
-└─────────────────────────────────────────────────────────────────────┘
-
-Data flow: Pipeline → S3/GCS bucket ← Gulli polls bucket
-
-Pipelines push the report to a shared cloud storage bucket (S3, GCS, Azure Blob). Gulli only needs credentials for the bucket, not for any platform. It polls the bucket, downloads the latest file per platform.
-
-Problem: Extra infrastructure to manage. Each pipeline needs storage credentials. But Gulli itself is simpler — one storage API instead of many platform APIs.
-
-How it works:
-
-Each platform runs Renovate in its CI (as you have now)
-After scan, pipeline PUSHES report to central storage (S3/GCS)
-Gulli only needs credentials for storage (not platforms!)
-Gulli fetches reports from storage, processes, notifies
-- approved
-
-Pros:
-
-Aspect	            Benefit
-Security	        Gulli ONLY needs storage credentials, not platform tokens
-Decoupled	        Platforms and processor are independent
-Platform-native CI	Each platform uses its own CI (no external access needed)
-Audit trail	        All reports stored with timestamps
-Scalable	        Can add platforms without changing Gulli
-Failure isolation	Platform failure doesn't affect others
-
-Cons:
-Aspect	            Drawback
-Extra infra	        Need to manage storage bucket
-Config duplication	Still need Renovate config in each platform
-Storage costs	    Minor, but exists
-Push complexity	    Each platform needs storage credentials
-
 
 
 
@@ -329,7 +258,75 @@ Firewall issues	    Webhook must be reachable from all platforms
 More complex	    More moving parts
 
 
-Approach 5: GitOps - Monorepo for Reports
+Approach 5: Fully Centralized (Gulli + Renovate)
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                     CENTRALIZED ARCHITECTURE                         │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│                  ┌─────────────────────────┐                        │
+│                  │         GULLI           │                        │
+│                  │   (Central Server/Cron) │                        │
+│                  └───────────┬─────────────┘                        │
+│                              │                                      │
+│                              ▼                                      │
+│                  ┌─────────────────────────┐                        │
+│                  │     Renovate CLI        │                        │
+│                  │  (runs inside Gulli)    │                        │
+│                  └───────────┬─────────────┘                        │
+│                              │                                      │
+│         ┌────────────────────┼────────────────────┐                 │
+│         ▼                    ▼                    ▼                 │
+│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐            │
+│  │   GitHub     │   │  BitBucket   │   │ Azure DevOps │            │
+│  │    Repos     │   │    Repos     │   │    Repos     │            │
+│  └──────────────┘   └──────────────┘   └──────────────┘            │
+│                              │                                      │
+│                              ▼                                      │
+│              ┌────────────────────────────┐                         │
+│              │     In-Memory Processing    │                         │
+│              │   (No artifact transfer)    │                         │
+│              └───────────┬────────────────┘                         │
+│                          │                                          │
+│              ┌───────────┴───────────┐                              │
+│              ▼                       ▼                              │
+│     ┌─────────────────┐    ┌─────────────────┐                      │
+│     │   Spreadsheet   │    │   Slack/JIRA    │                      │
+│     └─────────────────┘    └─────────────────┘                      │
+└─────────────────────────────────────────────────────────────────────┘
+
+Data flow: Gulli runs Renovate directly → report is a local file
+
+There is no transfer. Gulli spawns Renovate CLI itself, Renovate scans repos across all platforms, writes the report to a local file, Gulli reads it immediately. Everything happens in one process on one machine.
+
+Problem: Gulli needs tokens for every platform. All credentials in one place. If that machine is compromised, everything is exposed.
+
+How it works:
+
+Gulli wakes up (cron)
+Gulli spawns Renovate CLI with --dry-run=full --report-type=file
+For each platform, Renovate scans repos directly
+Report is generated in-memory/local file
+Gulli processes report → spreadsheet → notify
+- Not approved
+
+Pros:
+Aspect	                Benefit
+Single codebase	        One place to maintain all logic
+No artifact transfer	Data never leaves the central system
+Consistency	            Same processing logic for all platforms
+Simpler data flow	    No polling/fetching complexity
+Full control	        Complete ownership of the process
+
+Cons:
+Aspect	                Drawback
+SECURITY RISK	        Requires ALL platform tokens in one place
+Single point of failure	If Gulli dies, everything stops
+Resource intensive	    Scanning many repos takes time/memory
+Scaling limits	        Can't easily parallelize across machines
+Token exposure	        If Gulli server is compromised, all repos are exposed
+
+Approach 6: GitOps - Monorepo for Reports
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    GITOPS ARCHITECTURE                               │
 ├─────────────────────────────────────────────────────────────────────┤
@@ -376,6 +373,8 @@ Pipelines commit the report JSON to a central git repository. Gulli does a git p
 
 Problem: Each pipeline needs write access to the reports repo. Git isn't designed for frequent automated data pushes. Merge conflicts possible if two pipelines push simultaneously.
 
+
+
 How it works:
 
 Platforms run Renovate
@@ -397,9 +396,9 @@ Aspect	                        Drawback
 Two services to maintain	    More operational overhead
 Still centralized credentials	Renovate service has all tokens
 Internal API needed	            Need to build communication layer
-- Not Approved
+- not approved 
 
-Approach 6: Language-Specific Shared Library
+Approach 7: Language-Specific Shared Library
 ┌────────────────────────────────────────────────────────────────────────────────┐
 │              APPROACH 8: SHARED LIBRARY / DEPENDENCY                            │
 ├────────────────────────────────────────────────────────────────────────────────┤
@@ -453,7 +452,6 @@ Version fragmentation across repos
 Still needs secrets distributed everywhere
 Testing nightmare across languages
 
-- Not Approved
 
 Aspect	                Pros	                        Cons
 Consistency	            Same logic everywhere	        Must maintain 4+ libraries (Ruby, Node, Python, .NET, etc.)
@@ -464,6 +462,18 @@ Testing		                                            Test each library independe
 Breaking changes		                                Library update can break 100 repos
 Versioning hell		                                    Different repos on different versions
 CI complexity		                                    Each CI needs language-specific setup
+
+
+for repos where the credentials MUST NOT leave the platform, those need platform-native CI
+
+
+Renovate needs:
+currentValue → to know what to edit in file
+currentVersion → to calculate update type (major/minor/patch), breaking changes
+
+something like ^4.16.21, ~> 5.1.0, or >= 3.0, then:
+currentValue includes that symbol (^, ~>, >=)
+currentVersion is just the clean version number (like 4.16.21 or 5.1.0)
 
 note: 
 
